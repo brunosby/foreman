@@ -1,0 +1,18 @@
+{
+  "name": "foreman",
+  "version": "0.8.1",
+  "description": "How Claude works: a plan-first flow for long tasks, written completion criteria, hooks that point multi-step requests to that flow, hold their code edits until there is a plan, ask for a test run before work is called done, guards for secrets, risky commands and unfinished goals, a check that answers about the project and research rest on files read and pages found, and a check for CLAUDE.md lines that name what no longer exists.",
+  "author": {
+    "name": "brunosby",
+    "url": "https://github.com/brunosby"
+  },
+  "homepage": "https://github.com/brunosby/foreman",
+  "repository": "https://github.com/brunosby/foreman",
+  "license": "MIT",
+  "keywords": [
+    "workflow",
+    "hooks",
+    "review",
+    "safety"
+  ]
+}

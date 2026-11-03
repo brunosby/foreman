@@ -1,0 +1,42 @@
+{
+  "project": [
+    "onde fica a validação do formulário neste projeto?",
+    "como o timer termina quando o ciclo acaba?",
+    "qual é a duração padrão da pausa curta?",
+    "o que faz o taskReducer.ts?",
+    "where is the user session stored?",
+    "how does the app decide the next cycle type?",
+    "por que o histórico some quando eu recarrego a página?",
+    "quais rotas o app tem?",
+    "what happens when I click reset in settings?",
+    "esse projeto usa algum gerenciador de estado além do Context?"
+  ],
+  "research": [
+    "pesquise as boas práticas de hooks no Claude Code",
+    "procure fontes sobre context rot em modelos de linguagem",
+    "look up the latest stable version of Node.js",
+    "pesquise na internet como funciona o cache de prompt da Anthropic",
+    "busque referências sobre testes de acessibilidade em React",
+    "qual a versão mais recente do Vite?",
+    "search the web for how to configure eslint flat config with typescript",
+    "investigue em fontes oficiais se o React 19 ainda suporta class components",
+    "what is the latest version of TypeScript?",
+    "pesquise artigos sobre o efeito de planejar antes de codar em agentes"
+  ],
+  "quiet": [
+    "Adicione um botão de exportar CSV na página History",
+    "corrija o typo no título da página Settings",
+    "o que é um reducer?",
+    "what is the difference between useMemo and useCallback?",
+    "pode continuar?",
+    "/compact",
+    "<task-notification>background task done</task-notification>",
+    "você consegue ver os hooks do Claude Code que estão ativos?",
+    "obrigado, ficou ótimo",
+    "rode os testes e me diga o resultado"
+  ],
+  "pesquise_no_codigo": [
+    "pesquise no código onde o token expira",
+    "procure no projeto onde o beep é carregado"
+  ]
+}

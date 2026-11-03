@@ -1,0 +1,15 @@
+{
+  "name": "foreman",
+  "owner": {
+    "name": "brunosby",
+    "url": "https://github.com/brunosby"
+  },
+  "plugins": [
+    {
+      "name": "foreman",
+      "source": "./",
+      "description": "Plan-first flow, completion criteria and guard hooks for Claude Code."
+    }
+  ],
+  "description": "foreman: how Claude works, for Claude Code."
+}
