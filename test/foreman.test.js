@@ -248,6 +248,41 @@ test('a Grep over a folder with a secret file git does not ignore is denied; ign
   assert.strictEqual(d({ pattern: 'API_KEY', path: '.' }), null);
 });
 
+test('a negated glob with a folder leaves out only that folder: the secret file next to it is still searched', () => {
+  const { execSync } = require('child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fm-glob-'));
+  fs.mkdirSync(path.join(dir, 'node_modules', 'pkg'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'config'));
+  fs.writeFileSync(path.join(dir, '.env'), 'API_KEY=abc\n');
+  execSync('git init -q', { cwd: dir });
+  const d = (glob) => (c.preToolDecision('Grep', { pattern: 'API_KEY', path: dir, glob }, undefined, dir) || {}).permissionDecision || null;
+  // Measured in a real session: this exact Grep returned the values of .env.
+  assert.strictEqual(d('!node_modules/**'), 'deny');
+  assert.strictEqual(d('!**/node_modules/**'), 'deny');
+  assert.strictEqual(d('!dist/*'), 'deny');
+  assert.strictEqual(d('!**/.env'), null);
+  assert.strictEqual(d('!.env*'), null);
+  assert.strictEqual(d('src/**/*.ts'), null);
+  fs.renameSync(path.join(dir, '.env'), path.join(dir, 'config', '.env'));
+  assert.strictEqual(d('!config/**'), null);
+  assert.strictEqual(d('!node_modules/**'), 'deny');
+});
+
+test('default mode: commands that use a secret file only as a path pass; reading it is still denied', () => {
+  const cfg = { ...c.config(null), secrets: true };
+  const d = (command) => (c.preToolDecision('Bash', { command }, cfg) || {}).permissionDecision || null;
+  for (const cmd of ['git check-ignore -q .env', 'git check-ignore -v -- .env', 'git rm --cached .env', 'git ls-files --error-unmatch .env',
+    'test -f .env && echo ok', 'ls -la .env', 'Test-Path .env', 'chmod 600 .env', "cat >> .env <<'EOF'", 'printf "A=1\\n" >> .env', 'node gen.js > .env']) {
+    assert.notStrictEqual(d(cmd), 'deny', cmd);
+  }
+  for (const cmd of ['cat .env', 'tail -c 1 .env', 'git diff .env', 'cp .env backup.txt', 'mv .env notes.txt', 'ls .env | xargs cat', 'node -e "1" < .env', 'sed s/=.*// .env']) {
+    assert.strictEqual(d(cmd), 'deny', cmd);
+  }
+  // "block" also keeps writes and changes out.
+  for (const cmd of ['git rm --cached .env', 'chmod 600 .env', 'node gen.js > .env']) assert.strictEqual(decision(cmd), 'deny', cmd);
+  assert.notStrictEqual(decision('git check-ignore -q .env'), 'deny');
+});
+
 test('the plugin stays independent: no memory files, no other plugin named', () => {
   const files = [];
   const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).forEach((e) => {

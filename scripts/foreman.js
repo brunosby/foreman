@@ -148,9 +148,12 @@ function secretInCommand(command, cfg = DEFAULTS, cwd, dotMatch = false) {
   for (const seg of segments(command)) {
     const ws = words(seg);
     if (/^(echo|printf|write-host|write-output)$/i.test(ws[0] || '')) continue;
+    if (pathOnly(ws, cfg) &&!/\bxargs\b/.test(command)) continue; // ls .env | xargs cat reads it
     for (const [i, w] of ws.entries()) {
       // A commit or tag message is not a path: git commit -m "add .env to .gitignore".
       if (i > 0 && /^(-[a-zA-Z]*m|--message)$/.test(ws[i - 1]) && /^git(\.exe)?$/i.test(path.basename(ws[0] || ''))) continue;
+      // The target of > or >> is written, not read: cat >> .env <<EOF.
+      if (cfg.secrets !== 'block' && (/^\d?>>?$/.test(i > 0 ? ws[i - 1] : '') || /^\d?>>?[^>&]/.test(w))) continue;
       const token = w.replace(/^[<>]+|^\d?>+/, '').replace(/["'`,;)]+$/g, '').replace(/^["'`(]+/, '');
       if (token.startsWith('-') && !token.includes('=')) continue;
       if (/^--(?:exclude|exclude-dir|ignore|glob|iglob)=/i.test(token)) continue; // leaving a file out is not reading it
@@ -165,12 +168,30 @@ function secretInCommand(command, cfg = DEFAULTS, cwd, dotMatch = false) {
   for (const seg of quotedSegments(command)) {
     const ws = words(seg.trim());
     if (!INLINE.test(path.basename(ws[0] || ''))) continue;
-    for (const w of ws.slice(1)) {
-      const hit = w.split(/[\s'"`(),;+]+/).find((piece) => piece && isSecretPath(piece, cfg));
+    for (const [i, w] of ws.entries()) {
+      if (i === 0 || (cfg.secrets !== 'block' && (/^\d?>>?$/.test(ws[i - 1]) || /^\d?>>?[^>&]/.test(w)))) continue;
+      const hit =w.split(/[\s'"`(),;+]+/).find((piece) => piece && isSecretPath(piece, cfg));
       if (hit) return hit;
     }
   }
   return null;
+}
+
+// Commands that take a secret file as a path without putting its contents in the output: checking whether it
+// exists or is ignored, untracking it, changing its mode, deleting it (risky commands still ask for that).
+// Copy and move stay blocked: a copy under another name could then be read.
+// With "secrets": "block" the ones that change the file stay blocked too.
+const PATH_ONLY = /^(?:ls|dir|test|\[\[?|stat|test-path|get-item|get-childitem|gci)(?:\.exe)?$/i;
+const PATH_CHANGE = /^(?:touch|chmod|chown|rm|del|erase|remove-item)(?:\.exe)?$/i;
+
+function pathOnly(ws, cfg) {
+  const cmd = path.basename(String(ws[0] || '').replace(/^["']|["']$/g, ''));
+  const block = cfg.secrets === 'block';
+  if (PATH_ONLY.test(cmd) || (!block && PATH_CHANGE.test(cmd))) return true;
+  if (!/^git(\.exe)?$/i.test(cmd)) return false;
+  let i = 1;
+  while (i < ws.length && /^-[Cc]$/.test(ws[i])) i += 2;
+  return /^(?:check-ignore|ls-files|status)$/.test(ws[i] || '') || (!block && ws[i] === 'rm');
 }
 
 const INLINE = /^(?:node|nodejs|bun|deno|python[\d.]*|py|ruby|perl|php|sh|bash|zsh|pwsh|powershell)(?:\.exe)?$/i;
@@ -211,13 +232,25 @@ function gitIgnored(file, cwd) {
   } catch (_) { return false; }
 }
 
-function globKeeps(glob, name) {
+// A glob with a slash matches the path from the search folder, where * stays inside one folder and ** crosses
+// folders (as in ripgrep); one without a slash matches the file name anywhere.
+function pathGlobRegex(glob) {
+  const body = glob.replace(/^\.?\//, '').replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*\//g, '\u0000').replace(/\*\*/g, '\u0001').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]')
+    .replace(/\u0000/g, '(?:.*/)?').replace(/\u0001/g, '.*');
+  return new RegExp(`^${body}$`, 'i');
+}
+
+// `rel` is the file's path from the search folder, with forward slashes.
+function globKeeps(glob, rel) {
   if (!glob) return true;
   const alts = String(glob).split(/\s+/).filter(Boolean).flatMap((g) => {
     const m = /^(.*)\{([^}]*)\}(.*)$/.exec(g);
     return m ? m[2].split(',').map((x) => m[1] + x + m[3]) : [g];
   });
-  const test = (g) => globToRegex(g.replace(/^(?:\*\*\/)+/, '').split('/').pop()).test(name);
+  const name = rel.split('/').pop();
+  // "!node_modules/**" leaves out what is under node_modules, not a .env next to it.
+  const test = (g) => (g.replace(/\/+$/, '').includes('/') ? pathGlobRegex(g).test(rel) : globToRegex(g).test(name));
   if (alts.some((g) => g.startsWith('!') && test(g.slice(1)))) return false;
   const inc = alts.filter((g) => !g.startsWith('!'));
   return !inc.length || inc.some(test);
@@ -241,7 +274,8 @@ function secretInGrep(toolInput, cfg, cwd) {
   const hits = [];
   findSecretUnder(base, cfg, 0, { n: 0 }, hits);
   const typeGlob = ti.type ? GREP_TYPES[String(ti.type).toLowerCase()] : null;
-  return hits.find((f) => globKeeps(ti.glob, path.basename(f)) && globKeeps(typeGlob, path.basename(f)) && !gitIgnored(f, cwd)) || null;
+  const rel = (f) => path.relative(base, f).split(path.sep).join('/');
+  return hits.find((f) => globKeeps(ti.glob, rel(f)) && globKeeps(typeGlob, rel(f)) && !gitIgnored(f, cwd)) || null;
 }
 
 // The secret file a recursive search would read, or null. An --exclude naming the file counts as handled.
@@ -383,7 +417,8 @@ const RISKY = {
     [/\bdel\s+(?:\S+\s+)*\/[sq]\b/i, 'del /s'],
     [/\bremove-item\b.*-recurse/i, 'Remove-Item -Recurse'],
     [/\bfind\b.*\s-delete\b/, 'find -delete'],
-    [/\bgit\s+clean\s+(?:-\S*\s+)*-\S*f/, 'git clean -f'],
+    // -n/--dry-run only lists what would go.
+    [/\bgit\s+clean\b(?!.*\s(?:-[a-zA-Z]*n[a-zA-Z]*|--dry-run)(?:\s|$))\s+(?:-\S*\s+)*-\S*f/, 'git clean -f'],
     [/\b(?:shred|truncate)\s/, 'shred/truncate'],
     [/\bdrop\s+(?:table|database|schema)\b/i, 'DROP'],
     [/\bgit\s+(?:checkout|restore)\s+(?:\S+\s+)*(?:--\s+)?\.(?:\s|$)/, 'git checkout/restore . (discards changes)'],
@@ -443,7 +478,8 @@ function generatedOnly(seg, cfg) {
   return targets.every((t) => {
     const parts = t.replace(/\\/g, '/').replace(/^\.\//, '').split('/').filter(Boolean);
     if (!parts.length || path.isAbsolute(t) || /^[a-z]:/i.test(t) || parts.includes('..') || t.startsWith('~')) return false;
-    return dirs.has(parts[0].toLowerCase());
+    // A log or temp file (a run's own output, such as .verify-test.log) is not work to lose.
+    return dirs.has(parts[0].toLowerCase()) || /\.(?:log|tmp|temp)$/i.test(parts[parts.length - 1]);
   });
 }
 
@@ -612,6 +648,11 @@ function longTaskDirect(score = DIRECT_THRESHOLD, gate = false) {
     'shows its stages to the user and goes on without waiting for approval, and calls completion-criteria when there is no GOAL.md. ' +
     'When the user asked to skip planning, the plan is skipped and the user is told in one line.' + (gate ? GATE_NOTE : '');
 }
+
+// A request that asks for done criteria by name is what the completion-criteria skill is for.
+const CRITERIA = /\b(?:crit[eé]rios?\s+de\s+(?:conclus[aã]o|aceita[cç][aã]o|pronto|sucesso)|defini[cç][aã]o\s+de\s+(?:pronto|conclu[ií]do)|done\s+criteria|definition\s+of\s+done|acceptance\s+criteria|completion\s+criteria|success\s+criteria)\b/i;
+const CRITERIA_HINT = 'foreman: this request asks for completion criteria. In this project they are written by the completion-criteria skill, ' +
+  'loaded with the Skill tool before other tools; it writes GOAL.md with the evidence each criterion needs, and the work follows it.';
 
 const LONG_TASK_HINT = longTaskHint();
 const LONG_TASK_DIRECT = longTaskDirect();
@@ -1043,6 +1084,8 @@ function readTail(file) {
 }
 
 // Tool calls of the current turn: everything after the user's last prompt (tool results do not count as prompts).
+const DENIED = /^(?:PreToolUse:\w+ hook error|foreman: )|Confirm it is intended|has been denied|requires (?:manual )?approval|denied by your permission settings/;
+
 function turnCalls(transcriptPath) {
   const text = transcriptPath && readTail(transcriptPath);
   if (!text) return null;
@@ -1058,12 +1101,22 @@ function turnCalls(transcriptPath) {
       if (prompt) {
         calls = [];
         calls.prompt = typeof c === 'string' ? c : c.filter((b) => b && b.type === 'text').map((b) => b.text).join('\n');
+      } else if (Array.isArray(c)) {
+        // A call that was denied never ran: measured, a refused `rm -f` still drew the stale CLAUDE.md reminder.
+        for (const b of c) {
+          if (!b || b.type !== 'tool_result' || !b.is_error) continue;
+          const t = typeof b.content === 'string' ? b.content : JSON.stringify(b.content || '');
+          const call = calls.find((x) => x.id === b.tool_use_id);
+          if (call && DENIED.test(t)) call.denied = true;
+        }
       }
     } else if (o.type === 'assistant' && Array.isArray(c)) {
-      for (const b of c) if (b && b.type === 'tool_use') calls.push({ name: b.name, input: b.input || {} });
+      for (const b of c) if (b && b.type === 'tool_use') calls.push({ id: b.id, name: b.name, input: b.input || {} });
     }
   }
-  return calls;
+  const ran = calls.filter((x) => !x.denied);
+  ran.prompt = calls.prompt;
+  return ran;
 }
 
 // Code files changed in this turn since the last test or lint run, or null when there are none.
@@ -1081,9 +1134,20 @@ function unverifiedChanges(calls, root, buildCounts = false) {
       // "sed -i ... && npm test": the edit comes first in the line, the check after it.
       for (const x of edited) files.add(path.basename(x));
       if (ranTest(cmd) || (buildCounts && ranBuild(cmd))) files = new Set();
-    } else if (EDIT_TOOLS.has(c.name) && isCodeFile(f) && inside(f)) files.add(path.basename(f));
+    } else if (EDIT_TOOLS.has(c.name) && isCodeFile(f) && inside(f) && !commentOnly(c.name, c.input)) files.add(path.basename(f));
   }
   return files.size ? [...files] : null;
+}
+
+// An Edit that only adds or changes comments cannot break a test: measured, a JSDoc line drew a test and lint run.
+// # starts a comment only in some languages (in CSS it is a color, in JS a private field).
+const HASH_COMMENTS = /\.(?:py|pyi|sh|bash|zsh|rb|pl|r|ps1|ya?ml|toml)$/i;
+const stripComments = (s, hash) => String(s || '').replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, '').replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(hash ? /(^|\s)#.*$/gm : /(^|\s)\/\/.*$/gm, '$1').replace(/\s+/g, '');
+function commentOnly(tool, input) {
+  const edits = tool === 'MultiEdit' ? input.edits : tool === 'Edit' ? [input] : null;
+  const hash = HASH_COMMENTS.test(String(input.file_path || ''));
+  return Array.isArray(edits) && edits.length > 0 && edits.every((e) => e && typeof e.old_string === 'string' && typeof e.new_string === 'string' && stripComments(e.old_string, hash) === stripComments(e.new_string, hash));
 }
 
 // ---------- Stop ----------
@@ -1159,6 +1223,9 @@ function verifyReason(input, root, cfg, limit) {
     'If they cannot run here, say why in one line instead.';
 }
 
+const LAST_MESSAGE = 'The next message is the last one the user reads, in the language the user writes in: it gives the result of the ' +
+  'request itself (what was done, how it was checked) and then, in one line, what this check changed.';
+
 // Returns the Stop hook output, or null to let Claude stop. Both reminders share one block and one limit.
 function stopDecision(input, root, cfg = DEFAULTS) {
   const limit = Number(cfg.continuationLimit);
@@ -1169,7 +1236,8 @@ function stopDecision(input, root, cfg = DEFAULTS) {
   const claudeMd = claudeMdReason(input, root, cfg);
   const goal = goalReason(input, root, cfg, limit, state);
   const reasons = [ground, verify, claudeMd, goal && goal.reason].filter(Boolean);
-  if (reasons.length) return { decision: 'block', reason: reasons.join('\n') };
+  // Measured: after a reminder, the last message was about the reminder only and the task's own summary was left above it.
+  if (reasons.length) return { decision: 'block', reason: `${reasons.join('\n')}\n${LAST_MESSAGE}` };
   return goal && goal.notice ? { systemMessage: goal.notice } : null;
 }
 
@@ -1256,8 +1324,12 @@ function runHook(kind) {
       else emitContext('UserPromptSubmit', groundingText(cls, root, cfg));
       return;
     }
-    if (cfg.activation !== 'detect' || !large) return;
-    if (inShadow(cfg, 'activation')) { recordShadow('activation', input.session_id, { score }); return; }
+    if (cfg.activation !== 'detect') return;
+    // Measured: "Antes de começar, escreva os critérios de conclusão" was answered without the skill 2 of 2 times.
+    const criteria = !large && CRITERIA.test(String(input.prompt || '')) && skillNames().includes('completion-criteria');
+    if (!large && !criteria) return;
+    if (inShadow(cfg, 'activation')) { recordShadow('activation', input.session_id, { score, criteria }); return; }
+    if (criteria) { emitContext('UserPromptSubmit', CRITERIA_HINT); return; }
     const held = Boolean(state.gate) && !inShadow(cfg, 'plan');
     emitContext('UserPromptSubmit', score >= DIRECT_THRESHOLD && skillNames().includes('long-task') ? longTaskDirect(score, held) : longTaskHint(score, held));
   } else if (kind === 'session-start') {

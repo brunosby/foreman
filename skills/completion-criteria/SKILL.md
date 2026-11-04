@@ -1,6 +1,6 @@
 ---
 name: completion-criteria
-description: Before starting a task that needs proof it is done (a bug fix, a feature, a migration, an unattended run), write GOAL.md with the required evidence and the stop conditions. Use when the user asks for done criteria, or when the long-task skill needs them. Not for questions or edits that a single test run proves.
+description: Before starting a task that needs proof it is done (a bug fix, a feature, a migration, an unattended run), write GOAL.md with the required evidence and the stop conditions. Use when the user asks for done, completion or acceptance criteria ("critérios de conclusão", "definição de pronto", "definition of done") before the work, or when the long-task skill needs them. Not for questions or edits that a single test run proves.
 ---
 Always communicate with the user in the language they are using. Write GOAL.md in English.
 

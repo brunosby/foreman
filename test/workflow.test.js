@@ -317,3 +317,60 @@ test('by default a medium request (score 4 to 6) gets no hint; a clearly multi-s
   assert.match(hook('prompt', { cwd: dir, session_id: 'd2', prompt: large }, env).hookSpecificOutput.additionalContext, /long-task/);
   assert.strictEqual(hook('pre-tool', { cwd: dir, session_id: 'd2', tool_name: 'Edit', tool_input: { file_path: path.join(dir, 'src/a.js') } }, env), null);
 });
+
+test('verify: an Edit that only adds or changes comments does not ask for tests; one that changes code does', () => {
+  const root = path.join(os.tmpdir(), 'proj-c');
+  const f = path.join(root, 'src', 'History.tsx');
+  const doc = { old_string: 'export function History() {', new_string: '/**\n * Lists past tasks.\n */\nexport function History() {' };
+  assert.strictEqual(c.unverifiedChanges([{ name: 'Edit', input: { file_path: f, ...doc } }], root), null);
+  assert.strictEqual(c.unverifiedChanges([{ name: 'Edit', input: { file_path: f, old_string: 'a = 1; // x', new_string: 'a = 1; // y' } }], root), null);
+  assert.deepStrictEqual(c.unverifiedChanges([{ name: 'Edit', input: { file_path: f, old_string: 'a = 1;', new_string: 'a = 2; // y' } }], root), ['History.tsx']);
+  // # is a comment in Python, a private field in JS.
+  const py = path.join(root, 'src', 'a.py');
+  assert.strictEqual(c.unverifiedChanges([{ name: 'Edit', input: { file_path: py, old_string: 'x = 1', new_string: '# why\nx = 1' } }], root), null);
+  assert.deepStrictEqual(c.unverifiedChanges([{ name: 'Edit', input: { file_path: f, old_string: 'count = 0;', new_string: '#count = 0;' } }], root), ['History.tsx']);
+  assert.deepStrictEqual(c.unverifiedChanges([{ name: 'Write', input: { file_path: f } }], root), ['History.tsx']);
+});
+
+test('stop: a reminder asks that the last message still gives the result of the request', () => {
+  const dir = repo(NODE_PROJECT);
+  const t = transcript(dir, [['Edit', { file_path: path.join(dir, 'src', 'b.ts'), old_string: 'a', new_string: 'b' }]]);
+  const out = hook('stop', { cwd: dir, session_id: 'last1', transcript_path: t });
+  assert.match(out.reason, /changed code/);
+  assert.match(out.reason, /last one the user reads, in the language the user writes in: it gives the result of the request itself/);
+});
+
+test('a request that asks for completion criteria by name points to the completion-criteria skill', () => {
+  const dir = repo(NODE_PROJECT);
+  for (const prompt of ['Antes de começar, escreva os critérios de conclusão. Tarefa: testes para getNextCycleType.', 'Write the acceptance criteria first, then fix the login bug']) {
+    const out = hook('prompt', { cwd: dir, session_id: 'crit', prompt });
+    assert.match(out.hookSpecificOutput.additionalContext, /completion-criteria skill/, prompt);
+  }
+  assert.strictEqual(hook('prompt', { cwd: dir, session_id: 'crit', prompt: 'Corrija o typo no README' }), null);
+});
+
+test('risky: deleting log or temp files does not ask; other deletes still do', () => {
+  assert.deepStrictEqual(c.riskyCommand('rm -f .verify-test.log .verify-build.log'), []);
+  assert.deepStrictEqual(c.riskyCommand('rm -rf out.tmp'), []);
+  assert.strictEqual(c.riskyCommand('rm -f src/app.ts .verify.log')[0].category, 'delete');
+});
+
+test('stop: a call that was denied never ran, so it changes nothing and draws no reminder', () => {
+  const dir = repo({ ...NODE_PROJECT, 'CLAUDE.md': 'Run `npm run e2e` for the browser tests.\n' });
+  const file = path.join(dir, 't.jsonl');
+  const lines = [JSON.stringify({ type: 'user', message: { content: 'descarte tudo' } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'd1', name: 'Bash', input: { command: 'rm -f src/x.ts' } }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'd1', is_error: true, content: 'foreman: this command deletes data (rm -r/-f). Confirm it is intended.' }] } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'e1', name: 'Edit', input: { file_path: path.join(dir, 'src', 'a.ts'), old_string: 'a', new_string: 'b' } }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'e1', is_error: true, content: 'PreToolUse:Edit hook error: held until PLAN.md' }] } })];
+  fs.writeFileSync(file, lines.join('\n') + '\n');
+  assert.strictEqual(hook('stop', { cwd: dir, session_id: 'den1', transcript_path: file }), null);
+  // The same rm that ran does draw the CLAUDE.md check.
+  fs.writeFileSync(file, lines.slice(0, 2).join('\n') + '\n');
+  assert.match(hook('stop', { cwd: dir, session_id: 'den2', transcript_path: file }).reason, /npm run e2e/);
+});
+
+test('risky: git clean with -n or --dry-run only lists, so it does not ask', () => {
+  for (const cmd of ['git clean -fdn', 'git clean -n -fd', 'git clean --dry-run -f']) assert.deepStrictEqual(c.riskyCommand(cmd), [], cmd);
+  for (const cmd of ['git clean -fd', 'git clean -fdx']) assert.strictEqual(c.riskyCommand(cmd)[0].category, 'delete', cmd);
+});
