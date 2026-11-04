@@ -30,3 +30,5 @@ Stop conditions:
 ```
 
 If the plugin's Stop hook reminds you that GOAL.md has no final status, check the evidence and write the Status line. Do not start new work just to satisfy the reminder. For a quick condition in the current session only, the built-in `/goal` command is an alternative; its evaluator reads the conversation, so keep test results and output paths in the transcript.
+
+If `.claude/foreman.json` sets `"taskDir"` (a folder relative to the project root), GOAL.md, PLAN.md and PROGRESS.md go in that folder instead of the root.

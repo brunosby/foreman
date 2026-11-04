@@ -16,3 +16,5 @@ Always communicate with the user in the language they are using.
 9. **Clean up.** PLAN.md and PROGRESS.md belong to this task only. Ask the user whether to delete them or keep them out of the commit.
 
 Stop and ask the user when a stage fails twice for the same reason, when the plan turns out wrong, or when you need access or information you do not have.
+
+If `.claude/foreman.json` sets `"taskDir"` (a folder relative to the project root), GOAL.md, PLAN.md and PROGRESS.md go in that folder instead of the root.

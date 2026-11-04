@@ -35,8 +35,9 @@ const DEFAULTS = {
   planReminderEvery: 20,       // every N tool calls while PROGRESS.md is current, one line with its current step; 0 turns it off
   grounding: true,             // questions about the project and research requests: a statement on the prompt, and a Stop check that the answer read files / cites only links it saw; 'hint': statement only; false: off
   researchDomains: [],         // e.g. ["docs.example.org"]: named in the research statement as the preferred sources
-  claudeMd: true,              // Stop: when a turn renamed or removed things, say which commands or paths named in CLAUDE.md no longer exist; 'ask': the claude-md skill waits for approval before editing; false: off
+  claudeMd: true,              // Stop: when a turn renamed or removed things, say which commands or paths named in CLAUDE.md no longer exist; the claude-md skill applies a changed line and asks before removing one; 'ask': it asks before every change; false: off
   shadow: [],                  // rules that only record what they would do: activation, verify, secrets, risky, goal, plan, grounding, claudemd
+  taskDir: '',                 // folder for GOAL.md, PLAN.md and PROGRESS.md, relative to the project root (e.g. ".claude/task"); '' = the root
 };
 const TERMINAL = /^\s*[-*]?\s*status\s*:\s*(completed|blocked|budget exhausted)\b/im;
 
@@ -79,6 +80,15 @@ function config(root) {
 }
 
 const inShadow = (cfg, rule) => (cfg.shadow || []).includes(rule);
+
+// Where the task files live: taskDir inside the project, or the project root when it is unset or points outside.
+function taskDir(root, cfg = DEFAULTS) {
+  const rel = String((cfg && cfg.taskDir) || '').trim();
+  if (!rel || path.isAbsolute(rel)) return root;
+  const dir = path.resolve(root, rel);
+  return path.relative(root, dir).startsWith('..') ? root : dir;
+}
+const taskFile = (root, cfg, name) => path.join(taskDir(root, cfg), name);
 
 // What a shadow-mode rule would have done, so its false positives can be counted before it acts.
 function recordShadow(rule, session, detail) {
@@ -149,7 +159,10 @@ function secretInCommand(command, cfg = DEFAULTS, cwd, dotMatch = false) {
     const ws = words(seg);
     if (/^(echo|printf|write-host|write-output)$/i.test(ws[0] || '')) continue;
     if (pathOnly(ws, cfg) &&!/\bxargs\b/.test(command)) continue; // ls .env | xargs cat reads it
+    // cp .env.example .env: the last path of a copy is written, not read (the source is still checked).
+    const dest = cfg.secrets !== 'block' && COPY.test(path.basename(String(ws[0] || '').replace(/^["']|["']$/g, ''))) ? lastPathIndex(ws) : -1;
     for (const [i, w] of ws.entries()) {
+      if (i === dest) continue;
       // A commit or tag message is not a path: git commit -m "add .env to .gitignore".
       if (i > 0 && /^(-[a-zA-Z]*m|--message)$/.test(ws[i - 1]) && /^git(\.exe)?$/i.test(path.basename(ws[0] || ''))) continue;
       // The target of > or >> is written, not read: cat >> .env <<EOF.
@@ -158,6 +171,7 @@ function secretInCommand(command, cfg = DEFAULTS, cwd, dotMatch = false) {
       if (token.startsWith('-') && !token.includes('=')) continue;
       if (/^--(?:exclude|exclude-dir|ignore|glob|iglob)=/i.test(token)) continue; // leaving a file out is not reading it
       const value = token.includes('=') ? token.slice(token.indexOf('=') + 1) : token;
+      if (ENV_ACCESS.test(value)) continue; // node -e "console.log(process.env)": the runtime's variables, not a file
       if (isSecretPath(value, cfg)) return value;
       const expanded = cwd ? secretByWildcard(value, cfg, cwd, dotMatch) : null;
       if (expanded) return expanded;
@@ -170,7 +184,7 @@ function secretInCommand(command, cfg = DEFAULTS, cwd, dotMatch = false) {
     if (!INLINE.test(path.basename(ws[0] || ''))) continue;
     for (const [i, w] of ws.entries()) {
       if (i === 0 || (cfg.secrets !== 'block' && (/^\d?>>?$/.test(ws[i - 1]) || /^\d?>>?[^>&]/.test(w)))) continue;
-      const hit =w.split(/[\s'"`(),;+]+/).find((piece) => piece && isSecretPath(piece, cfg));
+      const hit = w.split(/[\s'"`(),;+]+/).find((piece) => piece && !ENV_OBJECT.test(piece) && isSecretPath(piece, cfg));
       if (hit) return hit;
     }
   }
@@ -195,6 +209,16 @@ function pathOnly(ws, cfg) {
 }
 
 const INLINE = /^(?:node|nodejs|bun|deno|python[\d.]*|py|ruby|perl|php|sh|bash|zsh|pwsh|powershell)(?:\.exe)?$/i;
+// The environment object of a runtime, not a file: process.env, import.meta.env, Deno.env, Bun.env.
+const ENV_OBJECT = /^(?:process|import\.meta|deno|bun)\.env$/i;
+const ENV_ACCESS = /(?:^|[^\w/\\.-])(?:process|import\.meta|deno|bun)\.env$|^(?:process|import\.meta|deno|bun)\.env$/i;
+const COPY = /^(?:cp|copy|copy-item|cpi|xcopy|robocopy)(?:\.exe)?$/i;
+
+// Index of the last word that is not an option (the destination of cp/copy), or -1.
+function lastPathIndex(ws) {
+  for (let i = ws.length - 1; i > 0; i--) if (!/^-/.test(ws[i]) && !/^\/[a-z]$/i.test(ws[i])) return i;
+  return -1;
+}
 
 // A recursive content search reads every file under its folders, secret files included, without naming them.
 // grep -r/-R and ag do; rg and git grep skip hidden or ignored files unless told otherwise.
@@ -407,7 +431,7 @@ function gitSecretReason(file) {
 
 // ---------- risky commands ----------
 
-// Effect categories from the loop-engineering article: deleting data or history, and talking to an external destination.
+// Effect categories: deleting data or history, and talking to an external destination.
 // Reading local files and editing allowed project files go through the normal permission flow.
 const RISKY = {
   delete: [
@@ -869,10 +893,33 @@ function touchedStructure(calls) {
   });
 }
 
+// Folders below the root that are projects of their own (a repository or a package), up to two levels down:
+// in a folder of several projects, CLAUDE.md names paths and scripts relative to them.
+const PROJECT_MARKERS = ['.git', 'package.json', 'pyproject.toml', 'go.mod', 'Cargo.toml', 'pom.xml', 'build.gradle', 'deno.json'];
+function nestedProjects(root, depth = 0, out = []) {
+  if (depth >= 2) return out;
+  let entries;
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch (_) { return out; }
+  for (const e of entries) {
+    if (!e.isDirectory() || SKIP_DIRS.has(e.name) || e.name.startsWith('.')) continue;
+    const dir = path.join(root, e.name);
+    if (PROJECT_MARKERS.some((m) => fs.existsSync(path.join(dir, m)))) out.push(dir);
+    nestedProjects(dir, depth + 1, out);
+    if (out.length > 50) break;
+  }
+  return out;
+}
+
 // Commands and paths the instruction files name that do not exist now: [{file, item}].
+// A path counts as existing when it is found from the root, from the instruction file's folder or from any
+// project folder below the root; a script, when any of their package.json files defines it.
 function staleInstructions(root) {
-  const pkg = readJson(path.join(root, 'package.json'));
-  const scripts = pkg && pkg.scripts ? new Set(Object.keys(pkg.scripts)) : null;
+  const nested = nestedProjects(root);
+  let scripts = null;
+  for (const dir of [root, ...nested]) {
+    const pkg = readJson(path.join(dir, 'package.json'));
+    if (pkg && pkg.scripts) { scripts = scripts || new Set(); for (const k of Object.keys(pkg.scripts)) scripts.add(k); }
+  }
   const out = [];
   for (const file of instructionFiles(root)) {
     let text;
@@ -887,7 +934,8 @@ function staleInstructions(root) {
         }
       }
       if (/^[\w@.-]*(?:\/[\w@.-]+)+\/?$|^[\w@-]+\.(?:js|jsx|ts|tsx|py|go|rs|json|md|toml|ya?ml|sh|ps1|css|html|sql)$/.test(inner) && !/[*<>{}$]/.test(inner) && !/^https?:/.test(inner)) {
-        if (!fs.existsSync(path.join(root, inner)) && !fs.existsSync(path.join(path.dirname(file), inner))) out.push({ file: name, item: inner });
+        const bases = [root, path.dirname(file), ...nested];
+        if (!bases.some((b) => fs.existsSync(path.join(b, inner)))) out.push({ file: name, item: inner });
       }
     }
   }
@@ -934,8 +982,8 @@ function editedCode(toolName, toolInput) {
   return isCodeFile(f) && !PLAN_FREE.has(path.basename(f).toLowerCase()) ? [f] : [];
 }
 
-function planWrittenSince(root, t) {
-  try { return fs.statSync(path.join(root, 'PLAN.md')).mtimeMs >= t - 1000; } catch (_) { return false; }
+function planWrittenSince(root, t, cfg = DEFAULTS) {
+  try { return fs.statSync(taskFile(root, cfg, 'PLAN.md')).mtimeMs >= t - 1000; } catch (_) { return false; }
 }
 
 // Edits sent together in one model response arrive as separate calls within moments of each other; they count as one hold.
@@ -945,7 +993,7 @@ const HOLD_WINDOW = 15000;
 function planGateDecision(input, root, cfg, state) {
   const gate = state.gate;
   if (cfg.planGate === false || !gate) return null;
-  if (state.planMode || planWrittenSince(root, gate.t) || now() - gate.t > Number(cfg.goalMaxAgeHours || DEFAULTS.goalMaxAgeHours) * HOUR) {
+  if (state.planMode || planWrittenSince(root, gate.t, cfg) || now() - gate.t > Number(cfg.goalMaxAgeHours || DEFAULTS.goalMaxAgeHours) * HOUR) {
     delete state.gate;
     return null;
   }
@@ -978,11 +1026,11 @@ function planReminder(root, cfg, state) {
   if (!every || every < 1) return null;
   let text;
   try {
-    const file = path.join(root, 'PROGRESS.md');
+    const file = taskFile(root, cfg, 'PROGRESS.md');
     if (now() - fs.statSync(file).mtimeMs > Number(cfg.goalMaxAgeHours || DEFAULTS.goalMaxAgeHours) * HOUR) return null;
     text = fs.readFileSync(file, 'utf8');
   } catch (_) { return null; }
-  const goal = goalFile(root);
+  const goal = goalFile(root, cfg);
   if (goal && TERMINAL.test(goal.text)) return null;
   state.calls = (state.calls || 0) + 1;
   if (state.calls % every) return null;
@@ -1046,6 +1094,21 @@ function isCodeFile(file) {
 }
 
 // The project's test command, if one can be found from its files; null exempts the project.
+// The test command of the nearest project above the first edited file that has one, up to the root: {cmd, dir}.
+function testCommandFor(root, paths = []) {
+  for (const p of paths) {
+    let dir = path.dirname(path.resolve(root, p));
+    while (!path.relative(root, dir).startsWith('..')) {
+      const cmd = testCommand(dir);
+      if (cmd) return { cmd, dir };
+      if (dir === root) break;
+      dir = path.dirname(dir);
+    }
+  }
+  const cmd = testCommand(root);
+  return cmd ? { cmd, dir: root } : null;
+}
+
 function testCommand(root) {
   const has = (f) => fs.existsSync(path.join(root, f));
   const pkg = readJson(path.join(root, 'package.json'));
@@ -1125,18 +1188,19 @@ function turnCalls(transcriptPath) {
 // (testCommand returns "npm run build"), running it counts as a check.
 function unverifiedChanges(calls, root, buildCounts = false) {
   const inside = (f) => !root || !path.isAbsolute(f) || !path.relative(root, f).startsWith('..');
-  let files = new Set();
+  let files = new Map(); // base name -> full path
   for (const c of calls) {
     const f = String(c.input.file_path || c.input.notebook_path || '');
     if (c.name === 'Bash' || c.name === 'PowerShell') {
       const cmd = c.input.command;
       const edited = shellEdits(cmd).filter((x) => inside(path.resolve(root || '.', x)));
       // "sed -i ... && npm test": the edit comes first in the line, the check after it.
-      for (const x of edited) files.add(path.basename(x));
-      if (ranTest(cmd) || (buildCounts && ranBuild(cmd))) files = new Set();
-    } else if (EDIT_TOOLS.has(c.name) && isCodeFile(f) && inside(f) && !commentOnly(c.name, c.input)) files.add(path.basename(f));
+      for (const x of edited) files.set(path.basename(x), path.resolve(root || '.', x));
+      if (ranTest(cmd) || (buildCounts && ranBuild(cmd))) files = new Map();
+    } else if (EDIT_TOOLS.has(c.name) && isCodeFile(f) && inside(f) && !commentOnly(c.name, c.input)) files.set(path.basename(f), path.resolve(root || '.', f));
   }
-  return files.size ? [...files] : null;
+  if (!files.size) return null;
+  return Object.defineProperty([...files.keys()], 'paths', { value: [...files.values()] }); // names, with the full paths alongside
 }
 
 // An Edit that only adds or changes comments cannot break a test: measured, a JSDoc line drew a test and lint run.
@@ -1152,8 +1216,8 @@ function commentOnly(tool, input) {
 
 // ---------- Stop ----------
 
-function goalFile(root) {
-  const file = path.join(root, 'GOAL.md');
+function goalFile(root, cfg = DEFAULTS) {
+  const file = taskFile(root, cfg, 'GOAL.md');
   try { return { file, text: fs.readFileSync(file, 'utf8'), mtime: fs.statSync(file).mtimeMs }; } catch (_) { return null; }
 }
 
@@ -1178,9 +1242,10 @@ function bumpCount(session, key) {
 }
 
 // GOAL.md written by this tool call (edit tools, or a shell edit such as echo >> GOAL.md).
-function writesGoal(toolName, toolInput, root) {
+function writesGoal(toolName, toolInput, root, cfg = DEFAULTS) {
   const ti = toolInput || {};
-  const isGoal = (f) => /^goal\.md$/i.test(path.basename(String(f || ''))) && !path.relative(root, path.resolve(root, String(f))).startsWith('..');
+  const dir = taskDir(root, cfg);
+  const isGoal = (f) => /^goal\.md$/i.test(path.basename(String(f || ''))) && path.relative(dir, path.dirname(path.resolve(root, String(f)))) === '';
   if (EDIT_TOOLS.has(toolName)) return isGoal(ti.file_path);
   if (toolName === 'Bash' || toolName === 'PowerShell') return shellEdits(ti.command, isGoal).length > 0;
   return false;
@@ -1189,7 +1254,7 @@ function writesGoal(toolName, toolInput, root) {
 function goalReason(input, root, cfg, limit, state = readState(input.session_id)) {
   if (inShadow(cfg, 'goal')) return null;
   if (!(state.goalRoots || []).includes(root)) return null;
-  const goal = goalFile(root);
+  const goal = goalFile(root, cfg);
   if (!goal || TERMINAL.test(goal.text)) return null;
   if (now() - goal.mtime > Number(cfg.goalMaxAgeHours || DEFAULTS.goalMaxAgeHours) * HOUR) return null;
   // stop_hook_active (already continuing because of a Stop hook) counts as one more attempt, like any other.
@@ -1209,17 +1274,21 @@ function verifyReason(input, root, cfg, limit) {
   if (cfg.verify === false || input.stop_hook_active) return null;
   const calls = turnCalls(input.transcript_path);
   if (!calls) return null;
-  const cmd = testCommand(root);
-  if (!cmd) return null; // no test setup to run: asking would be noise
-  const files = unverifiedChanges(calls, root, cmd === 'npm run build');
+  const edited = unverifiedChanges(calls, root, false);
+  if (!edited) return null;
+  // In a folder of several projects the tests are those of the project that holds the edited file.
+  const found = testCommandFor(root, edited.paths);
+  if (!found) return null; // no test setup to run: asking would be noise
+  const files = found.cmd === 'npm run build' ? unverifiedChanges(calls, root, true) : edited;
   if (!files) return null;
+  const cmd = found.dir === root ? found.cmd : `cd ${path.relative(root, found.dir).split(path.sep).join('/')} && ${found.cmd}`;
   if (inShadow(cfg, 'verify')) { recordShadow('verify', input.session_id, { files }); return null; }
   // The limit counts per request (the user's prompt), not per session: a new request may need the reminder again.
   const key = 'verify:' + crypto.createHash('sha1').update(String(calls.prompt || '')).digest('hex').slice(0, 12);
   if (bumpCount(input.session_id, key) > limit) return null;
   const list = files.slice(0, 5).join(', ') + (files.length > 5 ? ', …' : '');
   return `foreman: this turn changed code (${list}) and no test or lint command ran after the last change. ` +
-    `Run the project's ${cmd === 'npm run build' ? 'build' : 'tests'} (likely \`${cmd}\`) and report the command and its result before saying the work is done. ` +
+    `Run the project's ${found.cmd === 'npm run build' ? 'build' : 'tests'} (likely \`${cmd}\`) and report the command and its result before saying the work is done. ` +
     'If they cannot run here, say why in one line instead.';
 }
 
@@ -1256,7 +1325,7 @@ function compactContext(root, cfg = DEFAULTS, skip = []) {
   const parts = [];
   for (const name of TASK_FILES) {
     if (skip.includes(name)) continue;
-    const file = path.join(root, name);
+    const file = taskFile(root, cfg, name);
     let text;
     try {
       if (now() - fs.statSync(file).mtimeMs > maxAge) continue;
@@ -1296,7 +1365,7 @@ function runHook(kind) {
     const before = JSON.stringify(state);
     if (input.permission_mode === 'plan') state.planMode = true;
     // The open-goal reminder belongs to the session that wrote GOAL.md, not to every session in the project.
-    if (writesGoal(input.tool_name, input.tool_input, root)) state.goalRoots = [...new Set([...(state.goalRoots || []), root])];
+    if (writesGoal(input.tool_name, input.tool_input, root, cfg)) state.goalRoots = [...new Set([...(state.goalRoots || []), root])];
     let out = planGateDecision(input, root, cfg, state);
     if (out && inShadow(cfg, 'plan')) { recordShadow('plan', input.session_id, { tool: input.tool_name }); out = null; }
     const reminder = out ? null : planReminder(root, cfg, state);
@@ -1368,18 +1437,29 @@ function cli(args) {
     console.log(stale.length ? stale.map((x) => `${x.file}: ${x.item}`).join('\n') : 'nothing stale in CLAUDE.md');
   } else if (cmd === 'replay') {
     console.log(require('./replay.js').render(require('./replay.js').replay(args[1], Number(args[2]) || 90)));
+  } else if (cmd === 'shadow') {
+    // What the rules in shadow mode would have done, by rule, so one can be turned on (or left off) on evidence.
+    const days = Number(args[1]) || 30;
+    const since = now() - days * 24 * HOUR;
+    let rows = [];
+    try { rows = fs.readFileSync(path.join(foremanHome(), 'shadow.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((x) => x.t >= since); } catch (_) { /* none */ }
+    if (!rows.length) { console.log(`Nothing recorded in shadow mode in the last ${days} days (shadow now: ${cfg.shadow.join(', ') || 'none'}).`); return; }
+    const by = {};
+    for (const x of rows) { const b = (by[x.rule] = by[x.rule] || { n: 0, sessions: new Set() }); b.n++; b.sessions.add(x.s); }
+    console.log(`Shadow mode, last ${days} days (in shadow now: ${cfg.shadow.join(', ') || 'none'}):`);
+    for (const [rule, b] of Object.entries(by)) console.log(`  ${rule}: would have acted ${b.n}x in ${b.sessions.size} sessions`);
   } else if (cmd === 'path') {
     console.log(isSecretPath(args[1], cfg) ? 'secret: blocked' : 'not a secret');
   } else if (cmd === 'config') {
     console.log(`project: ${root}\nuser settings: ${path.join(foremanHome(), 'config.json')}\nproject settings: ${path.join(root, '.claude', 'foreman.json')}\neffective: ${JSON.stringify(cfg, null, 2)}`);
   } else {
-    console.log('usage: foreman.js <check "<command>" | path <file> | task "<prompt>" | ask "<prompt>" | stale | config | replay [transcripts-dir] [days]>');
+    console.log('usage: foreman.js <check "<command>" | path <file> | task "<prompt>" | ask "<prompt>" | stale | config | shadow [days] | replay [transcripts-dir] [days]>');
   }
 }
 
 module.exports = {
   isSecretPath, secretInCommand, secretIntoGit, secretInSearch, secretInGrep, secretNames, riskyCommand, preToolDecision, stopDecision, taskKey, config, projectRoot, segments,
-  compactContext, questionClass, groundingText, groundingReason, sessionFacts, missingPaths, unseenLinks, staleInstructions, touchedStructure, claudeMdReason, hashText, taskScore, isLargeTask, longTaskHint, longTaskDirect, planGateDecision, editedCode, currentStep, planReminder, SKIP_PLAN, ranTest, ranBuild, shellEdits, isCodeFile, testCommand, turnCalls, unverifiedChanges, LONG_TASK_HINT, LONG_TASK_DIRECT, DIRECT_THRESHOLD, SKILLS_HINT, SUBAGENT_RULES,
+  compactContext, questionClass, groundingText, groundingReason, sessionFacts, missingPaths, unseenLinks, staleInstructions, touchedStructure, claudeMdReason, hashText, taskScore, isLargeTask, longTaskHint, longTaskDirect, planGateDecision, editedCode, currentStep, planReminder, SKIP_PLAN, ranTest, ranBuild, shellEdits, isCodeFile, testCommand, testCommandFor, nestedProjects, taskDir, turnCalls, unverifiedChanges, LONG_TASK_HINT, LONG_TASK_DIRECT, DIRECT_THRESHOLD, SKILLS_HINT, SUBAGENT_RULES,
 };
 
 if (require.main === module) {

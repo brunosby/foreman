@@ -17,8 +17,8 @@ CLAUDE.md is read at the start of every session and again after /compact, so eac
    - specific and checkable ("run `npm run test:unit` before committing", not "write good tests").
    Leave out decisions about the current task, history, and anything secret. If it does not belong, say so in one line and stop.
 3. Edit by delta. Read the file, then change only the line that is wrong or add one line under the section it fits. Never reorder, reformat or rewrite the rest. If a line already says the same thing, change that line instead of adding a second one.
-   - For a stale command or path: check what exists now (the `scripts` in package.json, the file on disk) and replace only that command or path. If nothing replaces it, delete the line.
+   - For a stale command or path: check what exists now (the `scripts` in package.json, the file on disk, including subprojects below the root) and replace only that command or path. If nothing replaces it, do not delete the line yourself: propose the removal and wait (step 5).
 4. Keep the file under 200 lines. If the edit would pass that, move a block that applies only to some files into `.claude/rules/` and leave nothing else changed.
-5. Show the change as a short diff (the old line and the new line) and apply it without waiting, so the work goes on. If `.claude/foreman.json` sets `"claudeMd": "ask"`, show the diff and wait for the user to agree first.
+5. Show the change as a short diff (the old line and the new line). A line added or changed is applied without waiting, so the work goes on. A line removed with nothing in its place is only proposed: ask the user in one line and remove it only after they agree, because it takes that rule out of every future session. If `.claude/foreman.json` sets `"claudeMd": "ask"`, wait for the user to agree to every change.
 
 For a full review of every instruction file, suggest the user runs `/doctor prompt-audit` instead of rewriting the file here.

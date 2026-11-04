@@ -53,7 +53,7 @@ function stopFor(dir, prompt, entries, answer, session) {
 }
 
 const hook = (kind, input) => {
-  const out = execFileSync('node', [SCRIPT, 'hook', kind], { input: JSON.stringify(input), encoding: 'utf8', env: process.env });
+  const out = execFileSync('node', [SCRIPT, 'hook', kind], { windowsHide: true, input: JSON.stringify(input), encoding: 'utf8', env: process.env });
   return out ? JSON.parse(out) : null;
 };
 
@@ -184,3 +184,6 @@ test('a page downloaded with curl or opened with WebFetch counts as seen', () =>
     `Fonte: ${url}`, 'g-curl');
   assert.strictEqual(c.groundingReason(s.input, dir, CFG, s.state), null);
 });
+
+// Everything this suite wrote lives under one temporary folder, removed when the run ends.
+process.on('exit', () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) { /* already gone */ } });

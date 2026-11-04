@@ -14,7 +14,7 @@ const HOME = path.join(tmp, 'home');
 const REPO = path.join(tmp, 'repo');
 fs.mkdirSync(path.join(REPO, 'src'), { recursive: true });
 fs.mkdirSync(HOME, { recursive: true });
-execFileSync('git', ['init', '-q'], { cwd: REPO });
+execFileSync('git', ['init', '-q'], { windowsHide: true, cwd: REPO });
 
 process.env.FOREMAN_HOME = HOME;
 delete process.env.FOREMAN_NOW;
@@ -25,7 +25,7 @@ const preGit = c.preToolDecision;
 c.preToolDecision = (tool, ti, cfg, cwd) => preGit(tool, ti, cfg || c.config(null), cwd);
 
 function hook(kind, input, env = {}) {
-  const out = execFileSync('node', [SCRIPT, 'hook', kind], {
+  const out = execFileSync('node', [SCRIPT, 'hook', kind], { windowsHide: true,
     input: JSON.stringify({ cwd: REPO, session_id: 's1', ...input }), encoding: 'utf8', env: { ...process.env, ...env },
   });
   return out ? JSON.parse(out) : null;
@@ -133,7 +133,7 @@ test('pre-tool hook end to end, with project settings', () => {
 });
 
 test('a broken hook input does not break the session', () => {
-  const out = execFileSync('node', [SCRIPT, 'hook', 'pre-tool'], { input: 'not json', encoding: 'utf8' });
+  const out = execFileSync('node', [SCRIPT, 'hook', 'pre-tool'], { windowsHide: true, input: 'not json', encoding: 'utf8' });
   assert.strictEqual(out, '');
 });
 
@@ -232,7 +232,7 @@ test('skills have the frontmatter Claude Code needs; the decision step lists onl
 
 test('a Grep over a folder with a secret file git does not ignore is denied; ignored or globbed out passes', () => {
   const { execSync } = require('child_process');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fm-grep-'));
+  const dir = fs.mkdtempSync(path.join(tmp, 'fm-grep-'));
   fs.mkdirSync(path.join(dir, 'src'));
   fs.writeFileSync(path.join(dir, '.env'), 'API_KEY=abc\n');
   fs.writeFileSync(path.join(dir, 'src', 'a.js'), 'process.env.API_KEY\n');
@@ -250,7 +250,7 @@ test('a Grep over a folder with a secret file git does not ignore is denied; ign
 
 test('a negated glob with a folder leaves out only that folder: the secret file next to it is still searched', () => {
   const { execSync } = require('child_process');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fm-glob-'));
+  const dir = fs.mkdtempSync(path.join(tmp, 'fm-glob-'));
   fs.mkdirSync(path.join(dir, 'node_modules', 'pkg'), { recursive: true });
   fs.mkdirSync(path.join(dir, 'config'));
   fs.writeFileSync(path.join(dir, '.env'), 'API_KEY=abc\n');
@@ -306,7 +306,7 @@ test('the plugin stays independent: no memory files, no other plugin named', () 
 });
 
 test('a blocked env file names its variables, never the values', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fm-names-'));
+  const dir = fs.mkdtempSync(path.join(tmp, 'fm-names-'));
   fs.writeFileSync(path.join(dir, '.env'), '# comment\nexport LEDGER_API_KEY=sk-live-abc123\nLEDGER_DB_URL = postgres://u:p@h/db\nnot a pair\n');
   const read = c.preToolDecision('Read', { file_path: path.join(dir, '.env') }, c.config(null));
   assert.strictEqual(read.permissionDecision, 'deny');
@@ -321,7 +321,7 @@ test('a blocked env file names its variables, never the values', () => {
 });
 
 test('a recursive search over a folder with a secret file is denied unless it excludes the file', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fm-search-'));
+  const dir = fs.mkdtempSync(path.join(tmp, 'fm-search-'));
   fs.mkdirSync(path.join(dir, 'src'));
   fs.writeFileSync(path.join(dir, '.env'), 'API_KEY=x\n');
   fs.writeFileSync(path.join(dir, 'src', 'a.py'), 'KEY = 1\n');
@@ -353,7 +353,7 @@ test('fail-closed: when the pre-tool check throws, the call is denied with a cle
 });
 
 test('wildcards that would match a secret file in the folder are denied; others pass', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fm-wild-'));
+  const dir = fs.mkdtempSync(path.join(tmp, 'fm-wild-'));
   fs.mkdirSync(path.join(dir, 'cfg'));
   fs.writeFileSync(path.join(dir, '.env'), 'API_KEY=abc\n');
   fs.writeFileSync(path.join(dir, 'cfg', 'server.key'), 'x');
@@ -368,7 +368,7 @@ test('wildcards that would match a secret file in the folder are denied; others 
 
 test('the Grep type parameter counts as a filter: a known type that leaves the secret file out passes', () => {
   const { execSync } = require('child_process');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fm-gtype-'));
+  const dir = fs.mkdtempSync(path.join(tmp, 'fm-gtype-'));
   fs.writeFileSync(path.join(dir, '.env'), 'API_KEY=abc\n');
   fs.writeFileSync(path.join(dir, 'secrets.json'), '{}');
   fs.writeFileSync(path.join(dir, 'a.js'), 'process.env.API_KEY\n');
@@ -393,7 +393,7 @@ test('deletes inside generated folders (dist, build, coverage, logs…) do not a
 test('default: a secrets file can be written but not read, and no git add or commit puts it into the repository', () => {
   const dir = path.join(tmp, 'gitmode');
   fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
-  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['init', '-q'], { windowsHide: true, cwd: dir });
   fs.writeFileSync(path.join(dir, '.env'), 'DB_PASS=x\n');
   fs.writeFileSync(path.join(dir, 'src', 'a.js'), '1\n');
   const cfg = { ...c.config(null), secrets: true };
@@ -418,9 +418,9 @@ test('default: a secrets file can be written but not read, and no git add or com
   assert.strictEqual(sh('git add -A'), null);
   assert.strictEqual(sh('git add -f .env'), 'deny');
   // already staged, or tracked and changed: the commit is denied
-  execFileSync('git', ['add', '-f', '.env'], { cwd: dir });
+  execFileSync('git', ['add', '-f', '.env'], { windowsHide: true, cwd: dir });
   assert.strictEqual(sh('git commit -m x'), 'deny');
-  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'x'], { cwd: dir });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'x'], { windowsHide: true, cwd: dir });
   fs.writeFileSync(path.join(dir, '.env'), 'DB_PASS=y\n');
   assert.strictEqual(sh('git commit -am x'), 'deny');
   assert.strictEqual(sh('git add -u'), 'deny');
@@ -428,3 +428,6 @@ test('default: a secrets file can be written but not read, and no git add or com
   // off
   assert.strictEqual((preGit('Bash', { command: 'git add -f .env' }, { ...cfg, secrets: false }, dir) || {}).permissionDecision, undefined);
 });
+
+// Everything this suite wrote lives under one temporary folder, removed when the run ends.
+process.on('exit', () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) { /* already gone */ } });

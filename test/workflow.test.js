@@ -28,7 +28,7 @@ function repo(files = {}) {
 }
 
 function hook(kind, input, env = {}) {
-  const out = execFileSync('node', [SCRIPT, 'hook', kind], { input: JSON.stringify(input), encoding: 'utf8', env: { ...process.env, ...env } });
+  const out = execFileSync('node', [SCRIPT, 'hook', kind], { windowsHide: true, input: JSON.stringify(input), encoding: 'utf8', env: { ...process.env, ...env } });
   return out ? JSON.parse(out) : null;
 }
 
@@ -307,7 +307,7 @@ test('after /compact, the current task files come back; a finished or old task, 
 });
 
 test('by default a medium request (score 4 to 6) gets no hint; a clearly multi-step one gets the hint, and no edit is held (planGate is off)', () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'foreman-default-'));
+  const home = fs.mkdtempSync(path.join(tmp, 'foreman-default-'));
   const dir = repo();
   const env = { FOREMAN_HOME: home };
   const medium = 'Implemente um CRUD de funcionários com API REST, testes e tela de listagem';
@@ -374,3 +374,6 @@ test('risky: git clean with -n or --dry-run only lists, so it does not ask', () 
   for (const cmd of ['git clean -fdn', 'git clean -n -fd', 'git clean --dry-run -f']) assert.deepStrictEqual(c.riskyCommand(cmd), [], cmd);
   for (const cmd of ['git clean -fd', 'git clean -fdx']) assert.strictEqual(c.riskyCommand(cmd)[0].category, 'delete', cmd);
 });
+
+// Everything this suite wrote lives under one temporary folder, removed when the run ends.
+process.on('exit', () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) { /* already gone */ } });
